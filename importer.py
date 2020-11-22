@@ -38,6 +38,8 @@ class EggContext:
         self.textures = {}
         self.search_dir = None
 
+        self.current_file = None
+
         self.duplicate_faces = 0
         self.degenerate_faces = 0
 
@@ -57,6 +59,8 @@ class EggContext:
         self.group_vertex_refs = []
 
         self.joints = {}
+        self.bundle_actions = {}
+        self.character_objects = {}
 
     def read_file(self, path):
         """ Reads an .egg file, returning a root EggGroupNode. """
@@ -71,10 +75,39 @@ class EggContext:
 
         buffer = io.StringIO(data)
         root = EggGroupNode()
-        parse_egg(buffer, root, self)
+        self.current_file = buffer
+        try:
+            parse_egg(buffer, root, self)
+        except Exception as ex:
+            lineno = self.get_current_lineno()
+            self.current_file = None
+            msg = "Encountered %s at line %d of %s: %s" % (type(ex).__name__, lineno, os.path.basename(path), ex)
+            print(msg, file=sys.stderr)
+            self.error(msg)
+            raise
+        finally:
+            self.current_file = None
         buffer.close()
 
         return root
+
+    def get_current_lineno(self):
+        """ Returns the current line number. """
+
+        if self.current_file:
+            charno = self.current_file.tell()
+            lineno = self.current_file.getvalue()[:charno].count('\n') + 1
+            return lineno
+
+    def prefix_message(self, msg):
+        """ Returns a formatted error message, possibly prefixed with line
+        number. """
+
+        lineno = self.get_current_lineno()
+        if lineno:
+            msg = "At line %d: %s" % (lineno, msg)
+
+        return msg
 
     def info(self, message):
         """ Called when the importer wants to report something.  This can be
@@ -240,6 +273,15 @@ class EggContext:
 
         bpy.context.screen.scene = orig_scene
         self.search_dir = orig_search_dir
+
+    def auto_bind(self):
+        """ Automatically binds animations to actors. """
+
+        for name, object in self.character_objects.items():
+            if name in self.bundle_actions:
+                if not object.animation_data:
+                    object.animation_data_create()
+                object.animation_data.action = self.bundle_actions[name]
 
 
 class EggRenderMode:
@@ -453,7 +495,7 @@ class EggMaterial:
             has_color = texture.format != 'alpha'
             if texture.format == 'alpha':
                 has_alpha = True
-            elif texture.format in ('red', 'green', 'blue', 'luminance', 'rgb', 'rgb12', 'rgb8', 'rgb5', 'rgb332'):
+            elif texture.format in ('red', 'green', 'blue', 'luminance', 'rgb', 'rgb12', 'rgb8', 'rgb5', 'rgb332', 'srgb'):
                 has_alpha = False
             elif texture.texture.image.channels < 4:
                 has_alpha = False
@@ -479,16 +521,12 @@ class EggMaterial:
             m = texture.matrix
             if m is not None:
                 map_node = bmat.node_tree.nodes.new("ShaderNodeMapping")
-                try:
+                if bpy.app.version >= (2, 81):
+                    map_node.inputs['Scale'].default_value = (m[0][0], m[1][1], m[2][2])
+                    map_node.inputs['Location'].default_value = Vector((m[0][3], m[1][3], m[2][3]))
+                else:
                     map_node.scale = (m[0][0], m[1][1], m[2][2])
                     map_node.translation = Vector((m[0][3], m[1][3], m[2][3]))
-                except:
-                    map_node.inputs['Scale'].default_value[0] = m[0][0]
-                    map_node.inputs['Scale'].default_value[1] = m[1][1]
-                    map_node.inputs['Scale'].default_value[2] = m[2][2]
-                    map_node.inputs['Location'].default_value[0] = m[0][3]
-                    map_node.inputs['Location'].default_value[1] = m[1][3]
-                    map_node.inputs['Location'].default_value[2] = m[2][3]
                 bmat.node_tree.links.new(map_node.inputs['Vector'], uv_node.outputs['UV'])
                 bmat.node_tree.links.new(tex_node.inputs['Vector'], map_node.outputs['Vector'])
             else:
@@ -736,8 +774,9 @@ class EggTexture:
 
             elif name == 'envtype':
                 self.envtype = values[0].lower().replace('-', '_')
-                if self.envtype == 'normal':
+                if self.envtype in ('normal', 'normal_height', 'normal_gloss'):
                     self.texture.use_normal_map = True
+                    self.texture.image.colorspace_settings.name = 'Non-Color'
 
             elif name == 'minfilter':
                 self.minfilter = values[0].lower()
@@ -921,6 +960,7 @@ class EggPrimitive:
         self.alpha_mode = None
         self.visibility = None
         self.textures = []
+        self.pool = None
 
     def begin_child(self, context, type, name, values):
         type = type.upper()
@@ -1261,17 +1301,32 @@ class EggGroup(EggGroupNode):
         elif isinstance(child, EggPrimitive):
             self.any_geometry_below = True
 
-            vpool = context.vertex_pools[child.pool]
-            vpool.groups.add(self)
+            if child.pool:
+                vpool = context.vertex_pools[child.pool]
+                vpool.groups.add(self)
 
-            if self.mesh is None:
-                self.mesh = bpy.data.meshes.new(self.name)
+                if self.mesh is None:
+                    # Assign use_fake_user to keep it alive until it has been
+                    # assigned to an object.
+                    self.mesh = bpy.data.meshes.new(self.name)
+                    self.mesh.use_fake_user = True
 
-            if hasattr(child, 'components'):
-                for component in child.components:
-                    self.add_polygon(context, component, vpool)
+                    if self.name and self.mesh.name != self.name and \
+                       self.name in bpy.data.meshes:
+                        # Is the conflicting one an orphan?  Remove it then, so
+                        # that we can claim the name.
+                        other = bpy.data.meshes[self.name]
+                        if other.users == 0 and not other.use_fake_user:
+                            bpy.data.meshes.remove(other)
+                            self.mesh.name = self.name
+
+                if hasattr(child, 'components'):
+                    for component in child.components:
+                        self.add_polygon(context, component, vpool)
+                else:
+                    self.add_polygon(context, child, vpool)
             else:
-                self.add_polygon(context, child, vpool)
+                context.warn("Ignoring primitive without pool reference")
 
         elif isinstance(child, EggGroup):
             if type.upper() == 'INSTANCE' and (not self.matrix or not child.matrix) and \
@@ -1429,8 +1484,12 @@ class EggGroup(EggGroupNode):
         object.parent = parent
         self.object = object
 
+        if self.dart and not under_dart:
+            context.character_objects[self.name] = object
+
         if object.type == 'MESH':
             self.mesh_object = object
+            self.mesh.use_fake_user = False
 
         # Let the user know if we couldn't get the name we want.
         if object.name != self.name:
@@ -1540,6 +1599,11 @@ class EggGroup(EggGroupNode):
                 bpy.context.view_layer.objects.active = active
             else:
                 bpy.context.scene.objects.active = active
+
+        if bpy.app.version >= (2, 80):
+            object.select_set(True)
+        else:
+            object.select = True
 
         return object
 
@@ -1724,6 +1788,9 @@ class EggBundle(EggTable):
             self.action = bpy.data.actions.new(self.name)
             self.action.use_fake_user = True
 
+            if self.name:
+                context.bundle_actions[self.name] = self.action
+
             self.skeleton.build_animations(context, self)
 
         if self.morph:
@@ -1741,6 +1808,10 @@ class EggBundle(EggTable):
 
     def add_curves(self, context, name, data):
         """ Adds the curves for the given joint from the given <Xfm$Anim>. """
+
+        if name not in context.joints:
+            context.warn("Ignoring animation targeting non-existent joint {}".format(name))
+            return
 
         fcurves = self.action.fcurves
         prefix = 'pose.bones["{}"].'.format(name)
@@ -1811,8 +1882,12 @@ class EggBundle(EggTable):
                     matrices[i] = matmul(Matrix.Translation(v), matrices[i])
 
         # Multiply out the joint transform.
-        for i, m in enumerate(matrices):
-            matrices[i] = context.transform_matrix(matmul(joint_matrix.inverted(), m))
+        if joint_matrix:
+            for i, m in enumerate(matrices):
+                matrices[i] = context.transform_matrix(matmul(joint_matrix.inverted(), m))
+        else:
+            for i, m in enumerate(matrices):
+                matrices[i] = context.transform_matrix(m)
 
         if 'x' in channels or 'y' in channels or 'z' in channels:
             x_curve = fcurves.new(prefix + 'location', index=0)
