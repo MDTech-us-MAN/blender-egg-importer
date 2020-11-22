@@ -479,8 +479,16 @@ class EggMaterial:
             m = texture.matrix
             if m is not None:
                 map_node = bmat.node_tree.nodes.new("ShaderNodeMapping")
-                map_node.scale = (m[0][0], m[1][1], m[2][2])
-                map_node.translation = Vector((m[0][3], m[1][3], m[2][3]))
+                try:
+                    map_node.scale = (m[0][0], m[1][1], m[2][2])
+                    map_node.translation = Vector((m[0][3], m[1][3], m[2][3]))
+                except:
+                    map_node.inputs['Scale'].default_value[0] = m[0][0]
+                    map_node.inputs['Scale'].default_value[1] = m[1][1]
+                    map_node.inputs['Scale'].default_value[2] = m[2][2]
+                    map_node.inputs['Location'].default_value[0] = m[0][3]
+                    map_node.inputs['Location'].default_value[1] = m[1][3]
+                    map_node.inputs['Location'].default_value[2] = m[2][3]
                 bmat.node_tree.links.new(map_node.inputs['Vector'], uv_node.outputs['UV'])
                 bmat.node_tree.links.new(tex_node.inputs['Vector'], map_node.outputs['Vector'])
             else:
@@ -1166,12 +1174,10 @@ class EggGroup(EggGroupNode):
         type = type.upper()
 
         #if type in ('SCALAR', 'CHAR*', 'BILLBOARD', 'DCS', 'DART', 'SWITCH', 'OBJECTTYPE', 'TAG', 'MODEL', 'TEXLIST', 'REF'):
-
         if type in ('SCALAR', 'CHAR*'):
             name = name.lower().replace('_', '-')
 
-            if name in ('collide-mask', 'from-collide-mask', 'into-collide-mask', 'bin', 'draw-order'):
-                # YABEE recognizes these scalars as game properties.
+            if name in ('collide-mask', 'from-collide-mask', 'into-collide-mask', 'bin', 'draw-order', 'visibility', 'decal', 'decalbase'):
                 self.properties[name] = values[0]
             elif name == 'blend':
                 self.blend_mode = values[0].lower().replace('-', '_')
@@ -1188,8 +1194,26 @@ class EggGroup(EggGroupNode):
             elif name == 'blenda':
                 self.blend_color[3] = parse_number(values[0])
 
-        elif type in ('COLLIDE', 'OBJECTTYPE'):
+        elif type == 'COLLIDE':
+            self.properties['Collide'] = values[0]
+
+        elif type == 'BILLBOARD':
+            self.properties['billboard'] = values[0]
+
+        elif type == 'OBJECTTYPE':
+            if 'ObjectType' not in self.properties:
+                self.properties['ObjectType'] = ""
             self.properties[orig_type] = values[0]
+            if ',' + values[0] + ',' not in ',' + self.properties['ObjectType'] + ',':
+                self.properties['ObjectType'] += "," + values[0]
+                if self.properties['ObjectType'].startswith(","):
+                    self.properties['ObjectType'] = self.properties['ObjectType'][1:]
+
+        elif type == 'DCS':
+            self.properties['DCS'] = values[0]
+
+        elif type == "Model":
+            self.properties['Model'] = values[0]
 
         elif type == 'TAG':
             # Odd, but the reference .egg parser really intentionally joins
@@ -1351,7 +1375,10 @@ class EggGroup(EggGroupNode):
         else:
             index = len(self.materials)
             self.materials.append(bmat)
-            mesh.materials.append(bmat)
+            try:
+                mesh.materials.append(bmat)
+            except:
+                pass
         poly.material_index = index
 
     def build_tree(self, context, parent, inv_matrix=None, under_dart=False):
@@ -1473,6 +1500,12 @@ class EggGroup(EggGroupNode):
                 for name, value in self.properties.items():
                     bpy.ops.object.game_property_new(type='STRING', name=name)
                     object.game.properties[name].value = value
+            else:
+                print(self.properties)
+                for key, value in self.properties.items():
+                    if hasattr(object, key):
+                        print("Setting property: ", key)
+                        setattr(object, key, value)
 
             if self.shape_keys:
                 # Add the basis key first.
