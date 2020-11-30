@@ -1428,10 +1428,7 @@ class EggGroup(EggGroupNode):
         else:
             index = len(self.materials)
             self.materials.append(bmat)
-            #try:
             mesh.materials.append(bmat)
-            #except:
-            #    pass
         poly.material_index = index
 
     def build_tree(self, context, parent, inv_matrix=None, under_dart=False):
