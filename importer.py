@@ -1239,6 +1239,7 @@ class EggGroup(EggGroupNode):
 
         elif type == 'BILLBOARD':
             self.properties['billboard'] = values[0]
+            self.has_billboard = (values[0].lower() != 'none')
 
         elif type == 'OBJECTTYPE':
             if 'ObjectType' not in self.properties:
@@ -1275,9 +1276,6 @@ class EggGroup(EggGroupNode):
 
         elif type == 'DEFAULTPOSE':
             return EggTransform()
-
-        elif type == 'BILLBOARD':
-            self.has_billboard = (values[0].lower() != 'none')
 
         elif type == 'BILLBOARDCENTER':
             self.has_billboard_center = True
@@ -1430,10 +1428,10 @@ class EggGroup(EggGroupNode):
         else:
             index = len(self.materials)
             self.materials.append(bmat)
-            try:
-                mesh.materials.append(bmat)
-            except:
-                pass
+            #try:
+            mesh.materials.append(bmat)
+            #except:
+            #    pass
         poly.material_index = index
 
     def build_tree(self, context, parent, inv_matrix=None, under_dart=False):
@@ -1463,7 +1461,11 @@ class EggGroup(EggGroupNode):
                     max_diff = max(diff, max_diff)
 
                 if max_diff > 0.01:
-                    data.normals_split_custom_set(self.normals)
+                    print(self)
+                    print(context)
+                    print(data)
+                    print(self.normals)
+                    #data.normals_split_custom_set(self.normals)
                     data.use_auto_smooth = True
 
             if self.have_vertex_colors:
